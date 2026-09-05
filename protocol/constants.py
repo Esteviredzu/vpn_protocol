@@ -1,9 +1,12 @@
+HELLO = 1
+HELLO_OK = 2
+OPEN = 3
+OPEN_OK = 4
+DATA = 5
+CLOSE = 6
+
 MAGIC = b"VN"
 VERSION = 1
-
-OPEN = 1
-DATA = 2
-CLOSE = 3
 
 HEADER_FORMAT = "!2sBBI"
 
