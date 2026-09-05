@@ -9,18 +9,25 @@ HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
 
 
 class Frame:
+    """Хранит тип кадра и его payload"""
+
     def __init__(self, frame_type: int, payload: bytes = b"") -> None:
+        """Создаёт кадр с указанным типом и данными"""
         self.frame_type = frame_type
         self.payload = payload
 
     @property
     def length(self) -> int:
+        """Возвращает размер payload"""
         return len(self.payload)
 
 
 class FrameCodec:
+    """Кодирует и декодирует кадры для передачи по соединению"""
+
     @staticmethod
     def encode(frame: Frame) -> bytes:
+        """Собирает кадр в байты вместе с заголовком"""
         header = struct.pack(
             HEADER_FORMAT, MAGIC, VERSION, frame.frame_type, frame.length
         )
@@ -29,6 +36,7 @@ class FrameCodec:
 
     @staticmethod
     async def read(reader, cipher=None) -> Frame:
+        """Читает кадр из соединения и при необходимости расшифровывает его"""
         header = await reader.readexactly(HEADER_SIZE)
 
         magic, version, frame_type, length = struct.unpack(HEADER_FORMAT, header)
@@ -51,6 +59,7 @@ class FrameCodec:
 
     @staticmethod
     async def send(writer, frame: Frame, cipher=None) -> None:
+        """Отправляет кадр в соединение и при необходимости шифрует его"""
         if cipher is None:
             data = FrameCodec.encode(frame)
 
@@ -63,12 +72,14 @@ class FrameCodec:
 
     @staticmethod
     def create_data(data: bytes) -> Frame:
+        """Создаёт data кадр из переданных данных"""
         return Frame(frame_type=DATA, payload=data)
 
     @staticmethod
     def split_data(
         data: bytes, min_size: int = 1024, max_size: int = 16 * 1024
     ) -> list[Frame]:
+        """Разбивает большие данные на несколько кадров случайного размера"""
         frames = []
         offset = 0
 

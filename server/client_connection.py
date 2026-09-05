@@ -24,7 +24,10 @@ from server.target_connection import TargetConnection
 
 
 class ClientConnection:
+    """Управляет соединением клиента с сервером"""
+
     def __init__(self, reader, writer, secret: str) -> None:
+        """Сохраняет соединение и создаёт ключи сервера"""
         self.reader = reader
         self.writer = writer
         self.secret = secret
@@ -38,6 +41,7 @@ class ClientConnection:
         self.state = ServerState.CONNECTED
 
     async def run(self) -> None:
+        """Запускает handshake, подключение к target и передачу данных"""
         await self.handshake()
 
         await self.open_target()
@@ -45,6 +49,7 @@ class ClientConnection:
         await asyncio.gather(self._client_to_target(), self._target_to_client())
 
     async def handshake(self) -> None:
+        """Принимает HELLO, проверяет клиента и создаёт ключи сессии"""
         self._require_state(ServerState.CONNECTED)
 
         frame = await FrameCodec.read(self.reader)
@@ -111,6 +116,7 @@ class ClientConnection:
         self.state = ServerState.READY
 
     async def open_target(self) -> None:
+        """Обрабатывает запрос на подключение к целевому адресу"""
         self._require_state(ServerState.READY)
 
         frame = await FrameCodec.read(self.reader, cipher=self.cipher)
@@ -137,6 +143,7 @@ class ClientConnection:
         self.state = ServerState.OPEN
 
     async def _client_to_target(self) -> None:
+        """Передаёт расшифрованные данные от клиента в target"""
         self._require_state(ServerState.OPEN)
 
         while True:
@@ -153,6 +160,7 @@ class ClientConnection:
                 raise ValueError(f"Unexpected frame: " f"{frame.frame_type}")
 
     async def _target_to_client(self) -> None:
+        """Читает данные от target и отправляет их клиенту"""
         self._require_state(ServerState.OPEN)
 
         while True:
@@ -167,6 +175,7 @@ class ClientConnection:
 
     @staticmethod
     def _parse_open(payload: bytes) -> tuple[str, int]:
+        """Достаёт hostname и port из кaдра"""
         if len(payload) < 4:
             raise ValueError("Invalid OPEN payload")
 
@@ -186,6 +195,7 @@ class ClientConnection:
         return hostname, port
 
     async def close(self) -> None:
+        """Закрывает target и соединение с клиентом"""
         if self.target:
             await self.target.close()
 
@@ -196,6 +206,7 @@ class ClientConnection:
         self.state = ServerState.CLOSED
 
     def _require_state(self, expected: ServerState) -> None:
+        """Проверяет, что сервер находится в нужном состоянии"""
         if self.state != expected:
             raise RuntimeError(
                 f"Invalid server state: "

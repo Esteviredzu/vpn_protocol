@@ -15,6 +15,7 @@ VPN_SECRET = os.environ["VPN_SECRET"]
 
 
 async def main() -> None:
+    """Запускает локальный vpn proxy"""
     proxy = LocalProxy(SERVER_HOST, SERVER_PORT, VPN_SECRET)
 
     await proxy.start()

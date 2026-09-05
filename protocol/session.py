@@ -13,11 +13,14 @@ KEY_SIZE = 32
 
 @dataclass
 class KeyPair:
+    """Хранит публичный и приватный ключи стороны"""
+
     public_key: bytes
     private_key: bytes
 
     @classmethod
     def generate(cls) -> KeyPair:
+        """Генерирует новую пару ключей"""
         public_key, private_key = crypto_kx_keypair()
 
         return cls(public_key=public_key, private_key=private_key)
@@ -25,6 +28,8 @@ class KeyPair:
 
 @dataclass
 class SessionKeys:
+    """Хранит ключи для отправки и получения данных"""
+
     send_key: bytes
     receive_key: bytes
 
@@ -32,6 +37,7 @@ class SessionKeys:
 def derive_client_session_keys(
     key_pair: KeyPair, server_public_key: bytes
 ) -> SessionKeys:
+    """Получает ключи сессии для клиента на основе ключей сервера"""
     if len(server_public_key) != KEY_SIZE:
         raise ValueError("Invalid server public key length")
 
@@ -45,6 +51,7 @@ def derive_client_session_keys(
 def derive_server_session_keys(
     key_pair: KeyPair, client_public_key: bytes
 ) -> SessionKeys:
+    """Получает ключи сессии для сервера на основе ключей клиента"""
     if len(client_public_key) != KEY_SIZE:
         raise ValueError("Invalid client public key length")
 

@@ -12,7 +12,10 @@ MAX_COUNTER = (1 << 64) - 1
 
 
 class SessionCipher:
+    """Отвечает за шифрование и расшифровку данных внутри сессии"""
+
     def __init__(self, send_key: bytes, receive_key: bytes) -> None:
+        """Создаёт шифр с отдельными ключами для отправки и приёма"""
         if len(send_key) != Aead.KEY_SIZE:
             raise ValueError("Invalid send key length")
 
@@ -26,6 +29,7 @@ class SessionCipher:
         self.receive_counter = 0
 
     def encrypt(self, frame_type: int, payload: bytes) -> bytes:
+        """Шифрует данные кадра и добавляет к ним счётчик"""
         if self.send_counter > MAX_COUNTER:
             raise OverflowError("Send counter exhausted")
 
@@ -48,6 +52,7 @@ class SessionCipher:
         return header + counter_bytes + ciphertext
 
     def decrypt(self, frame_type: int, payload: bytes) -> bytes:
+        """Проверяет и расшифровывает полученные данные"""
         minimum_size = COUNTER_SIZE + self.receive_box.MACBYTES
 
         if len(payload) < minimum_size:

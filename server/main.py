@@ -14,6 +14,7 @@ VPN_SECRET = os.environ["VPN_SECRET"]
 
 
 async def handle_client(reader, writer) -> None:
+    """Создаёт и запускает обработчик для одного клиента"""
     address = writer.get_extra_info("peername")
 
     print(f"[SERVER] Client connected: " f"{address}")
@@ -33,6 +34,7 @@ async def handle_client(reader, writer) -> None:
 
 
 async def main() -> None:
+    """Запускает сервер и принимает входящие соединения"""
     server = await asyncio.start_server(handle_client, HOST, PORT)
 
     print(f"[SERVER] Listening on " f"{HOST}:{PORT}")

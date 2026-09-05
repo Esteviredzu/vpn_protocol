@@ -4,6 +4,8 @@ from enum import Enum, auto
 
 
 class ClientState(Enum):
+    """Состояния клиентского соединения"""
+
     DISCONNECTED = auto()
     CONNECTED = auto()
     HELLO_SENT = auto()
@@ -16,6 +18,8 @@ class ClientState(Enum):
 
 
 class ServerState(Enum):
+    """Состояния серверного соединения"""
+
     CONNECTED = auto()
     HELLO_RECEIVED = auto()
     AUTHENTICATING = auto()

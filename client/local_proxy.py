@@ -10,12 +10,16 @@ LOCAL_PORT = 8080
 
 
 class LocalProxy:
+    """Локальный HTTP-прокси, через который приложения подключаются к туннелю"""
+
     def __init__(self, server_host: str, server_port: int, secret: str) -> None:
+        """Сохраняет параметры подключения к VPN-серверу"""
         self.server_host = server_host
         self.server_port = server_port
         self.secret = secret
 
     async def start(self) -> None:
+        """Запускает локальный прокси на указанном порту"""
         server = await asyncio.start_server(self.handle_client, LOCAL_HOST, LOCAL_PORT)
 
         print(f"[CLIENT] Listening on " f"{LOCAL_HOST}:{LOCAL_PORT}")
@@ -24,6 +28,7 @@ class LocalProxy:
             await server.serve_forever()
 
     async def handle_client(self, local_reader, local_writer) -> None:
+        """Обрабатывает одно подключение от локального клиента"""
         connection = None
 
         try:
@@ -64,6 +69,7 @@ class LocalProxy:
     async def _local_to_server(
         self, local_reader, connection: ServerConnection
     ) -> None:
+        """Передаёт данные от локального приложения в VPN-соединение"""
         while True:
             data = await local_reader.read(64 * 1024)
 
@@ -75,6 +81,7 @@ class LocalProxy:
     async def _server_to_local(
         self, connection: ServerConnection, local_writer
     ) -> None:
+        """Передаёт данные от сервера обратно локальному приложению"""
         while True:
             frame = await connection.read_frame()
 
@@ -91,6 +98,7 @@ class LocalProxy:
 
     @staticmethod
     async def _read_http_headers(reader) -> bytes:
+        """Читает HTTP-заголовки до конца блока CONNECT-запроса"""
         data = bytearray()
 
         while b"\r\n\r\n" not in data:
@@ -105,6 +113,7 @@ class LocalProxy:
 
     @staticmethod
     def _parse_connect(request: bytes) -> tuple[str, int]:
+        """Достаёт адрес и порт из HTTP CONNECT-запроса"""
         first_line = request.split(b"\r\n", 1)[0]
 
         method, target, _ = first_line.split()

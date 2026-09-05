@@ -24,7 +24,10 @@ MAX_FRAME_SIZE = 16 * 1024
 
 
 class ServerConnection:
+    """Управляет соединением клиента с VPN-сервером"""
+
     def __init__(self, host: str, port: int, secret: str) -> None:
+        """Сохраняет настройки соединения и создаёт ключи клиента"""
         self.host = host
         self.port = port
         self.secret = secret
@@ -39,6 +42,7 @@ class ServerConnection:
         self.state = ClientState.DISCONNECTED
 
     async def connect(self) -> None:
+        """Устанавливает tcp соединение с сервером и запускает handshake"""
         self.reader, self.writer = await asyncio.open_connection(self.host, self.port)
 
         self.state = ClientState.CONNECTED
@@ -46,6 +50,7 @@ class ServerConnection:
         await self.handshake()
 
     async def handshake(self) -> None:
+        """Проводит обмен ключами и авторизацию клиента"""
         self._require_state(ClientState.CONNECTED)
 
         await FrameCodec.send(
@@ -108,6 +113,7 @@ class ServerConnection:
         self.state = ClientState.READY
 
     async def open_target(self, hostname: str, port: int) -> None:
+        """Просит сервер открыть соединение с указанным адресом"""
         self._require_state(ClientState.READY)
 
         hostname_bytes = hostname.encode()
@@ -132,17 +138,20 @@ class ServerConnection:
         self.state = ClientState.OPEN
 
     async def send_data(self, data: bytes) -> None:
+        """Разбивает данные на кадры и отправляет их серверу"""
         self._require_state(ClientState.OPEN)
 
         for frame in FrameCodec.split_data(data, MIN_FRAME_SIZE, MAX_FRAME_SIZE):
             await FrameCodec.send(self.writer, frame, cipher=self.cipher)
 
     async def read_frame(self):
+        """Читает следующий кадр от сервера"""
         self._require_state(ClientState.OPEN)
 
         return await FrameCodec.read(self.reader, cipher=self.cipher)
 
     async def close(self) -> None:
+        """Закрывает соединение с сервером"""
         if self.writer is None:
             return
 
@@ -163,6 +172,7 @@ class ServerConnection:
         self.state = ClientState.CLOSED
 
     def _require_state(self, expected: ClientState) -> None:
+        """Проверяет, что соединение находится в нужном состоянии"""
         if self.state != expected:
             raise RuntimeError(
                 f"Invalid client state: "
