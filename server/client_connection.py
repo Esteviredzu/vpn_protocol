@@ -4,7 +4,8 @@ import asyncio
 import secrets
 import struct
 
-from protocol.auth import verify_response
+from protocol.auth import create_server_proof, verify_response
+from protocol.cipher import SessionCipher
 from protocol.constants import (
     AUTH_CHALLENGE,
     AUTH_OK,
@@ -17,6 +18,7 @@ from protocol.constants import (
     OPEN_OK,
 )
 from protocol.framing import Frame, FrameCodec
+from protocol.session import KeyPair, derive_server_session_keys
 from protocol.state import ServerState
 from server.target_connection import TargetConnection
 
@@ -29,10 +31,15 @@ class ClientConnection:
 
         self.target = None
 
+        self.key_pair = KeyPair.generate()
+
+        self.cipher = None
+
         self.state = ServerState.CONNECTED
 
     async def run(self) -> None:
         await self.handshake()
+
         await self.open_target()
 
         await asyncio.gather(self._client_to_target(), self._target_to_client())
@@ -45,9 +52,16 @@ class ClientConnection:
         if frame.frame_type != HELLO:
             raise ValueError("Expected HELLO")
 
+        client_public_key = frame.payload
+
+        if len(client_public_key) != 32:
+            raise ValueError("Invalid client public key")
+
         self.state = ServerState.HELLO_RECEIVED
 
-        await FrameCodec.send(self.writer, Frame(frame_type=HELLO_OK))
+        await FrameCodec.send(
+            self.writer, Frame(frame_type=HELLO_OK, payload=self.key_pair.public_key)
+        )
 
         self.state = ServerState.AUTHENTICATING
 
@@ -62,17 +76,44 @@ class ClientConnection:
         if frame.frame_type != AUTH_RESPONSE:
             raise ValueError("Expected AUTH_RESPONSE")
 
-        if not verify_response(self.secret, challenge, frame.payload):
+        response = frame.payload
+
+        if len(response) != 32:
+            raise ValueError("Invalid authentication response")
+
+        if not verify_response(
+            self.secret,
+            challenge,
+            client_public_key,
+            self.key_pair.public_key,
+            response,
+        ):
             raise PermissionError("Authentication failed")
 
-        await FrameCodec.send(self.writer, Frame(frame_type=AUTH_OK))
+        session_keys = derive_server_session_keys(self.key_pair, client_public_key)
+
+        self.cipher = SessionCipher(
+            send_key=session_keys.send_key, receive_key=session_keys.receive_key
+        )
+
+        server_proof = create_server_proof(
+            self.secret,
+            challenge,
+            client_public_key,
+            self.key_pair.public_key,
+            response,
+        )
+
+        await FrameCodec.send(
+            self.writer, Frame(frame_type=AUTH_OK, payload=server_proof)
+        )
 
         self.state = ServerState.READY
 
     async def open_target(self) -> None:
         self._require_state(ServerState.READY)
 
-        frame = await FrameCodec.read(self.reader)
+        frame = await FrameCodec.read(self.reader, cipher=self.cipher)
 
         if frame.frame_type != OPEN:
             raise ValueError("Expected OPEN")
@@ -89,7 +130,9 @@ class ClientConnection:
 
         print(f"[SERVER] Connected to " f"{hostname}:{port}")
 
-        await FrameCodec.send(self.writer, Frame(frame_type=OPEN_OK))
+        await FrameCodec.send(
+            self.writer, Frame(frame_type=OPEN_OK), cipher=self.cipher
+        )
 
         self.state = ServerState.OPEN
 
@@ -97,7 +140,7 @@ class ClientConnection:
         self._require_state(ServerState.OPEN)
 
         while True:
-            frame = await FrameCodec.read(self.reader)
+            frame = await FrameCodec.read(self.reader, cipher=self.cipher)
 
             if frame.frame_type == DATA:
                 await self.target.send(frame.payload)
@@ -118,7 +161,9 @@ class ClientConnection:
             if not data:
                 break
 
-            await FrameCodec.send(self.writer, FrameCodec.create_data(data))
+            await FrameCodec.send(
+                self.writer, FrameCodec.create_data(data), cipher=self.cipher
+            )
 
     @staticmethod
     def _parse_open(payload: bytes) -> tuple[str, int]:
@@ -128,6 +173,7 @@ class ClientConnection:
         hostname_length = struct.unpack("!H", payload[:2])[0]
 
         hostname_start = 2
+
         hostname_end = hostname_start + hostname_length
 
         if len(payload) < hostname_end + 2:

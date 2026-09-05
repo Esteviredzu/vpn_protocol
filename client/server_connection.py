@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 
-from protocol.auth import create_response
+from protocol.auth import create_response, verify_server_proof
+from protocol.cipher import SessionCipher
 from protocol.constants import (
     AUTH_CHALLENGE,
     AUTH_OK,
@@ -15,6 +16,7 @@ from protocol.constants import (
     OPEN_OK,
 )
 from protocol.framing import Frame, FrameCodec
+from protocol.session import KeyPair, derive_client_session_keys
 from protocol.state import ClientState
 
 MIN_FRAME_SIZE = 1024
@@ -30,6 +32,10 @@ class ServerConnection:
         self.reader = None
         self.writer = None
 
+        self.key_pair = KeyPair.generate()
+
+        self.cipher = None
+
         self.state = ClientState.DISCONNECTED
 
     async def connect(self) -> None:
@@ -42,7 +48,9 @@ class ServerConnection:
     async def handshake(self) -> None:
         self._require_state(ClientState.CONNECTED)
 
-        await FrameCodec.send(self.writer, Frame(frame_type=HELLO))
+        await FrameCodec.send(
+            self.writer, Frame(frame_type=HELLO, payload=self.key_pair.public_key)
+        )
 
         self.state = ClientState.HELLO_SENT
 
@@ -51,6 +59,11 @@ class ServerConnection:
         if frame.frame_type != HELLO_OK:
             raise ValueError("Expected HELLO_OK")
 
+        server_public_key = frame.payload
+
+        if len(server_public_key) != 32:
+            raise ValueError("Invalid server public key")
+
         self.state = ClientState.AUTHENTICATING
 
         frame = await FrameCodec.read(self.reader)
@@ -58,10 +71,14 @@ class ServerConnection:
         if frame.frame_type != AUTH_CHALLENGE:
             raise ValueError("Expected AUTH_CHALLENGE")
 
-        if len(frame.payload) != 32:
+        challenge = frame.payload
+
+        if len(challenge) != 32:
             raise ValueError("Invalid challenge length")
 
-        response = create_response(self.secret, frame.payload)
+        response = create_response(
+            self.secret, challenge, self.key_pair.public_key, server_public_key
+        )
 
         await FrameCodec.send(
             self.writer, Frame(frame_type=AUTH_RESPONSE, payload=response)
@@ -71,6 +88,22 @@ class ServerConnection:
 
         if frame.frame_type != AUTH_OK:
             raise PermissionError("Authentication failed")
+
+        if not verify_server_proof(
+            self.secret,
+            challenge,
+            self.key_pair.public_key,
+            server_public_key,
+            response,
+            frame.payload,
+        ):
+            raise PermissionError("Server authentication failed")
+
+        session_keys = derive_client_session_keys(self.key_pair, server_public_key)
+
+        self.cipher = SessionCipher(
+            send_key=session_keys.send_key, receive_key=session_keys.receive_key
+        )
 
         self.state = ClientState.READY
 
@@ -85,11 +118,13 @@ class ServerConnection:
             + port.to_bytes(2, "big")
         )
 
-        await FrameCodec.send(self.writer, Frame(frame_type=OPEN, payload=payload))
+        await FrameCodec.send(
+            self.writer, Frame(frame_type=OPEN, payload=payload), cipher=self.cipher
+        )
 
         self.state = ClientState.OPEN_SENT
 
-        frame = await FrameCodec.read(self.reader)
+        frame = await FrameCodec.read(self.reader, cipher=self.cipher)
 
         if frame.frame_type != OPEN_OK:
             raise ConnectionError("Server failed to open target")
@@ -100,12 +135,12 @@ class ServerConnection:
         self._require_state(ClientState.OPEN)
 
         for frame in FrameCodec.split_data(data, MIN_FRAME_SIZE, MAX_FRAME_SIZE):
-            await FrameCodec.send(self.writer, frame)
+            await FrameCodec.send(self.writer, frame, cipher=self.cipher)
 
     async def read_frame(self):
         self._require_state(ClientState.OPEN)
 
-        return await FrameCodec.read(self.reader)
+        return await FrameCodec.read(self.reader, cipher=self.cipher)
 
     async def close(self) -> None:
         if self.writer is None:
@@ -115,7 +150,9 @@ class ServerConnection:
             self.state = ClientState.CLOSING
 
             try:
-                await FrameCodec.send(self.writer, Frame(frame_type=CLOSE))
+                await FrameCodec.send(
+                    self.writer, Frame(frame_type=CLOSE), cipher=self.cipher
+                )
             except Exception:
                 pass
 

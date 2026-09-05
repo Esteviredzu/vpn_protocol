@@ -28,7 +28,7 @@ class FrameCodec:
         return header + frame.payload
 
     @staticmethod
-    async def read(reader) -> Frame:
+    async def read(reader, cipher=None) -> Frame:
         header = await reader.readexactly(HEADER_SIZE)
 
         magic, version, frame_type, length = struct.unpack(HEADER_FORMAT, header)
@@ -44,11 +44,20 @@ class FrameCodec:
 
         payload = await reader.readexactly(length)
 
+        if cipher is not None:
+            payload = cipher.decrypt(frame_type, payload)
+
         return Frame(frame_type=frame_type, payload=payload)
 
     @staticmethod
-    async def send(writer, frame: Frame) -> None:
-        writer.write(FrameCodec.encode(frame))
+    async def send(writer, frame: Frame, cipher=None) -> None:
+        if cipher is None:
+            data = FrameCodec.encode(frame)
+
+        else:
+            data = cipher.encrypt(frame.frame_type, frame.payload)
+
+        writer.write(data)
 
         await writer.drain()
 
