@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 import struct
 
 from protocol.constants import DATA, HEADER_FORMAT, MAGIC, MAX_FRAME_SIZE, VERSION
@@ -56,9 +57,9 @@ class FrameCodec:
         return Frame(frame_type=DATA, payload=data)
 
     @staticmethod
-    def split_data(data: bytes, min_size: int, max_size: int) -> list[Frame]:
-        import random
-
+    def split_data(
+        data: bytes, min_size: int = 1024, max_size: int = 16 * 1024
+    ) -> list[Frame]:
         frames = []
         offset = 0
 
@@ -70,9 +71,7 @@ class FrameCodec:
             else:
                 size = random.randint(min_size, max_size)
 
-            chunk = data[offset : offset + size]
-
-            frames.append(Frame(frame_type=DATA, payload=chunk))
+            frames.append(FrameCodec.create_data(data[offset : offset + size]))
 
             offset += size
 

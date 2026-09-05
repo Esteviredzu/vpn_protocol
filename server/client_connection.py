@@ -1,18 +1,31 @@
 from __future__ import annotations
 
 import asyncio
+import secrets
 import struct
 
-from protocol.constants import CLOSE, DATA, HELLO, HELLO_OK, OPEN, OPEN_OK
+from protocol.auth import verify_response
+from protocol.constants import (
+    AUTH_CHALLENGE,
+    AUTH_OK,
+    AUTH_RESPONSE,
+    CLOSE,
+    DATA,
+    HELLO,
+    HELLO_OK,
+    OPEN,
+    OPEN_OK,
+)
 from protocol.framing import Frame, FrameCodec
 from protocol.state import ServerState
 from server.target_connection import TargetConnection
 
 
 class ClientConnection:
-    def __init__(self, reader, writer) -> None:
+    def __init__(self, reader, writer, secret: str) -> None:
         self.reader = reader
         self.writer = writer
+        self.secret = secret
 
         self.target = None
 
@@ -20,7 +33,6 @@ class ClientConnection:
 
     async def run(self) -> None:
         await self.handshake()
-
         await self.open_target()
 
         await asyncio.gather(self._client_to_target(), self._target_to_client())
@@ -36,6 +48,24 @@ class ClientConnection:
         self.state = ServerState.HELLO_RECEIVED
 
         await FrameCodec.send(self.writer, Frame(frame_type=HELLO_OK))
+
+        self.state = ServerState.AUTHENTICATING
+
+        challenge = secrets.token_bytes(32)
+
+        await FrameCodec.send(
+            self.writer, Frame(frame_type=AUTH_CHALLENGE, payload=challenge)
+        )
+
+        frame = await FrameCodec.read(self.reader)
+
+        if frame.frame_type != AUTH_RESPONSE:
+            raise ValueError("Expected AUTH_RESPONSE")
+
+        if not verify_response(self.secret, challenge, frame.payload):
+            raise PermissionError("Authentication failed")
+
+        await FrameCodec.send(self.writer, Frame(frame_type=AUTH_OK))
 
         self.state = ServerState.READY
 
@@ -98,7 +128,6 @@ class ClientConnection:
         hostname_length = struct.unpack("!H", payload[:2])[0]
 
         hostname_start = 2
-
         hostname_end = hostname_start + hostname_length
 
         if len(payload) < hostname_end + 2:

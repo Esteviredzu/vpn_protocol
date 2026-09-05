@@ -10,9 +10,10 @@ LOCAL_PORT = 8080
 
 
 class LocalProxy:
-    def __init__(self, server_host: str, server_port: int) -> None:
+    def __init__(self, server_host: str, server_port: int, secret: str) -> None:
         self.server_host = server_host
         self.server_port = server_port
+        self.secret = secret
 
     async def start(self) -> None:
         server = await asyncio.start_server(self.handle_client, LOCAL_HOST, LOCAL_PORT)
@@ -32,7 +33,9 @@ class LocalProxy:
 
             print(f"[CLIENT] CONNECT " f"{hostname}:{port}")
 
-            connection = ServerConnection(self.server_host, self.server_port)
+            connection = ServerConnection(
+                self.server_host, self.server_port, self.secret
+            )
 
             await connection.connect()
 

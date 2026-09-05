@@ -1,9 +1,16 @@
 import asyncio
+import os
+
+from dotenv import load_dotenv
 
 from server.client_connection import ClientConnection
 
+load_dotenv()
+
 HOST = "0.0.0.0"
-PORT = 9000
+PORT = int(os.getenv("VPN_SERVER_PORT", "9000"))
+
+VPN_SECRET = os.environ["VPN_SECRET"]
 
 
 async def handle_client(reader, writer) -> None:
@@ -11,13 +18,13 @@ async def handle_client(reader, writer) -> None:
 
     print(f"[SERVER] Client connected: " f"{address}")
 
-    connection = ClientConnection(reader, writer)
+    connection = ClientConnection(reader, writer, VPN_SECRET)
 
     try:
         await connection.run()
 
     except Exception as error:
-        print(f"[SERVER] Error for {address}: " f"{error}")
+        print(f"[SERVER] Error for " f"{address}: {error}")
 
     finally:
         await connection.close()

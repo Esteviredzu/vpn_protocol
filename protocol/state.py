@@ -7,6 +7,7 @@ class ClientState(Enum):
     DISCONNECTED = auto()
     CONNECTED = auto()
     HELLO_SENT = auto()
+    AUTHENTICATING = auto()
     READY = auto()
     OPEN_SENT = auto()
     OPEN = auto()
@@ -17,6 +18,7 @@ class ClientState(Enum):
 class ServerState(Enum):
     CONNECTED = auto()
     HELLO_RECEIVED = auto()
+    AUTHENTICATING = auto()
     READY = auto()
     OPEN_RECEIVED = auto()
     OPEN = auto()

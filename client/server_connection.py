@@ -2,7 +2,18 @@ from __future__ import annotations
 
 import asyncio
 
-from protocol.constants import CLOSE, DATA, HELLO, HELLO_OK, OPEN, OPEN_OK
+from protocol.auth import create_response
+from protocol.constants import (
+    AUTH_CHALLENGE,
+    AUTH_OK,
+    AUTH_RESPONSE,
+    CLOSE,
+    DATA,
+    HELLO,
+    HELLO_OK,
+    OPEN,
+    OPEN_OK,
+)
 from protocol.framing import Frame, FrameCodec
 from protocol.state import ClientState
 
@@ -11,9 +22,10 @@ MAX_FRAME_SIZE = 16 * 1024
 
 
 class ServerConnection:
-    def __init__(self, host: str, port: int) -> None:
+    def __init__(self, host: str, port: int, secret: str) -> None:
         self.host = host
         self.port = port
+        self.secret = secret
 
         self.reader = None
         self.writer = None
@@ -39,12 +51,39 @@ class ServerConnection:
         if frame.frame_type != HELLO_OK:
             raise ValueError("Expected HELLO_OK")
 
+        self.state = ClientState.AUTHENTICATING
+
+        frame = await FrameCodec.read(self.reader)
+
+        if frame.frame_type != AUTH_CHALLENGE:
+            raise ValueError("Expected AUTH_CHALLENGE")
+
+        if len(frame.payload) != 32:
+            raise ValueError("Invalid challenge length")
+
+        response = create_response(self.secret, frame.payload)
+
+        await FrameCodec.send(
+            self.writer, Frame(frame_type=AUTH_RESPONSE, payload=response)
+        )
+
+        frame = await FrameCodec.read(self.reader)
+
+        if frame.frame_type != AUTH_OK:
+            raise PermissionError("Authentication failed")
+
         self.state = ClientState.READY
 
     async def open_target(self, hostname: str, port: int) -> None:
         self._require_state(ClientState.READY)
 
-        payload = self._create_open_payload(hostname, port)
+        hostname_bytes = hostname.encode()
+
+        payload = (
+            len(hostname_bytes).to_bytes(2, "big")
+            + hostname_bytes
+            + port.to_bytes(2, "big")
+        )
 
         await FrameCodec.send(self.writer, Frame(frame_type=OPEN, payload=payload))
 
@@ -60,14 +99,10 @@ class ServerConnection:
     async def send_data(self, data: bytes) -> None:
         self._require_state(ClientState.OPEN)
 
-        frames = FrameCodec.split_data(
-            data, min_size=MIN_FRAME_SIZE, max_size=MAX_FRAME_SIZE
-        )
-
-        for frame in frames:
+        for frame in FrameCodec.split_data(data, MIN_FRAME_SIZE, MAX_FRAME_SIZE):
             await FrameCodec.send(self.writer, frame)
 
-    async def read_frame(self) -> Frame:
+    async def read_frame(self):
         self._require_state(ClientState.OPEN)
 
         return await FrameCodec.read(self.reader)
@@ -97,13 +132,3 @@ class ServerConnection:
                 f"{self.state.name}, "
                 f"expected {expected.name}"
             )
-
-    @staticmethod
-    def _create_open_payload(hostname: str, port: int) -> bytes:
-        hostname_bytes = hostname.encode()
-
-        return (
-            len(hostname_bytes).to_bytes(2, "big")
-            + hostname_bytes
-            + port.to_bytes(2, "big")
-        )
