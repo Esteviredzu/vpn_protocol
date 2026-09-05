@@ -6,7 +6,7 @@ from client.server_connection import ServerConnection
 from protocol.constants import DATA, CLOSE
 
 LOCAL_HOST = "127.0.0.1"
-LOCAL_PORT = 8080
+LOCAL_PORT = 9003
 
 
 class LocalProxy:
@@ -50,10 +50,34 @@ class LocalProxy:
 
             await local_writer.drain()
 
-            await asyncio.gather(
-                self._local_to_server(local_reader, connection),
-                self._server_to_local(connection, local_writer),
+            local_to_server = asyncio.create_task(
+                self._local_to_server(local_reader, connection)
             )
+
+            server_to_local = asyncio.create_task(
+                self._server_to_local(connection, local_writer)
+            )
+
+            done, pending = await asyncio.wait(
+                {local_to_server, server_to_local}, return_when=asyncio.FIRST_COMPLETED
+            )
+
+            for task in pending:
+                task.cancel()
+
+            await asyncio.gather(*pending, return_exceptions=True)
+
+            for task in done:
+                if task.cancelled():
+                    continue
+
+                exception = task.exception()
+
+                if exception is not None:
+                    raise exception
+
+        except (ConnectionError, asyncio.IncompleteReadError):
+            pass
 
         except Exception as error:
             print(f"[CLIENT] Error: {error}")
@@ -64,12 +88,15 @@ class LocalProxy:
 
             local_writer.close()
 
-            await local_writer.wait_closed()
+            try:
+                await local_writer.wait_closed()
+            except OSError:
+                pass
 
     async def _local_to_server(
         self, local_reader, connection: ServerConnection
     ) -> None:
-        """Передаёт данные от локального приложения в VPN-соединение"""
+        """Передаёт данные от локального приложения в vpn"""
         while True:
             data = await local_reader.read(64 * 1024)
 

@@ -14,6 +14,7 @@ from protocol.constants import (
     DATA,
     HELLO,
     HELLO_OK,
+    MAX_FRAME_PAYLOAD_SIZE,
     OPEN,
     OPEN_OK,
 )
@@ -46,7 +47,35 @@ class ClientConnection:
 
         await self.open_target()
 
-        await asyncio.gather(self._client_to_target(), self._target_to_client())
+        client_to_target = asyncio.create_task(self._client_to_target())
+
+        target_to_client = asyncio.create_task(self._target_to_client())
+
+        done, pending = await asyncio.wait(
+            {client_to_target, target_to_client}, return_when=asyncio.FIRST_COMPLETED
+        )
+
+        for task in pending:
+            task.cancel()
+
+        await asyncio.gather(*pending, return_exceptions=True)
+
+        for task in done:
+            if task.cancelled():
+                continue
+
+            exception = task.exception()
+
+            if exception is not None:
+                raise exception
+
+        if target_to_client in done:
+            try:
+                await FrameCodec.send(
+                    self.writer, Frame(frame_type=CLOSE), cipher=self.cipher
+                )
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                pass
 
     async def handshake(self) -> None:
         """Принимает HELLO, проверяет клиента и создаёт ключи сессии"""
@@ -164,7 +193,7 @@ class ClientConnection:
         self._require_state(ServerState.OPEN)
 
         while True:
-            data = await self.target.receive(64 * 1024)
+            data = await self.target.receive(MAX_FRAME_PAYLOAD_SIZE)
 
             if not data:
                 break
@@ -199,9 +228,19 @@ class ClientConnection:
         if self.target:
             await self.target.close()
 
-        self.writer.close()
+        if self.writer is None:
+            self.state = ServerState.CLOSED
+            return
 
-        await self.writer.wait_closed()
+        writer = self.writer
+        self.writer = None
+
+        writer.close()
+
+        try:
+            await writer.wait_closed()
+        except OSError:
+            pass
 
         self.state = ServerState.CLOSED
 

@@ -22,12 +22,18 @@ class TargetConnection:
 
     async def send(self, data: bytes) -> None:
         """Отправляет данные в target"""
+        if self.writer is None:
+            raise ConnectionError("Target connection is closed")
+
         self.writer.write(data)
 
         await self.writer.drain()
 
     async def receive(self, size: int) -> bytes:
         """Читает данные из target"""
+        if self.reader is None:
+            raise ConnectionError("Target connection is closed")
+
         return await self.reader.read(size)
 
     async def close(self) -> None:
@@ -35,6 +41,12 @@ class TargetConnection:
         if self.writer is None:
             return
 
-        self.writer.close()
+        writer = self.writer
+        self.writer = None
 
-        await self.writer.wait_closed()
+        writer.close()
+
+        try:
+            await writer.wait_closed()
+        except OSError:
+            pass

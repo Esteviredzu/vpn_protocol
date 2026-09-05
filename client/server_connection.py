@@ -155,19 +155,28 @@ class ServerConnection:
         if self.writer is None:
             return
 
-        if self.state not in (ClientState.CLOSING, ClientState.CLOSED):
+        writer = self.writer
+        self.writer = None
+
+        if self.cipher is not None and self.state not in (
+            ClientState.CLOSING,
+            ClientState.CLOSED,
+        ):
             self.state = ClientState.CLOSING
 
             try:
                 await FrameCodec.send(
-                    self.writer, Frame(frame_type=CLOSE), cipher=self.cipher
+                    writer, Frame(frame_type=CLOSE), cipher=self.cipher
                 )
-            except Exception:
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 pass
 
-        self.writer.close()
+        writer.close()
 
-        await self.writer.wait_closed()
+        try:
+            await writer.wait_closed()
+        except OSError:
+            pass
 
         self.state = ClientState.CLOSED
 

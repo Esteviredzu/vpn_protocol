@@ -5,7 +5,7 @@ import struct
 from nacl.exceptions import CryptoError
 from nacl.secret import Aead
 
-from protocol.constants import HEADER_FORMAT, MAGIC, VERSION
+from protocol.constants import HEADER_FORMAT, MAGIC, MAX_FRAME_PAYLOAD_SIZE, VERSION
 
 COUNTER_SIZE = 8
 MAX_COUNTER = (1 << 64) - 1
@@ -32,6 +32,9 @@ class SessionCipher:
         """Шифрует данные кадра и добавляет к ним счётчик"""
         if self.send_counter > MAX_COUNTER:
             raise OverflowError("Send counter exhausted")
+
+        if len(payload) > MAX_FRAME_PAYLOAD_SIZE:
+            raise ValueError("Payload too large")
 
         counter = self.send_counter
 
@@ -77,6 +80,9 @@ class SessionCipher:
             plaintext = self.receive_box.decrypt(ciphertext, aad=header, nonce=nonce)
         except CryptoError as error:
             raise ValueError("Encrypted frame authentication failed") from error
+
+        if len(plaintext) > MAX_FRAME_PAYLOAD_SIZE:
+            raise ValueError("Payload too large")
 
         self.receive_counter += 1
 
