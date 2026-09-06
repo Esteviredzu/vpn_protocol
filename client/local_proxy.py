@@ -7,6 +7,7 @@ from protocol.constants import DATA, CLOSE
 
 LOCAL_HOST = "127.0.0.1"
 LOCAL_PORT = 9003
+MAX_HEADER_SIZE = 64 * 1024
 
 
 class LocalProxy:
@@ -136,6 +137,9 @@ class LocalProxy:
 
             data.extend(chunk)
 
+            if len(data) > MAX_HEADER_SIZE:
+                raise ValueError("HTTP headers too large")
+
         return bytes(data)
 
     @staticmethod
@@ -143,11 +147,21 @@ class LocalProxy:
         """Достаёт адрес и порт из HTTP CONNECT-запроса"""
         first_line = request.split(b"\r\n", 1)[0]
 
-        method, target, _ = first_line.split()
+        parts = first_line.split()
+
+        if len(parts) != 3:
+            raise ValueError("Invalid HTTP request line")
+
+        method, target, _ = parts
 
         if method != b"CONNECT":
             raise ValueError("Only CONNECT is supported")
 
-        hostname, port = target.decode().rsplit(":", 1)
+        target_str = target.decode()
 
-        return hostname, int(port)
+        if ":" not in target_str:
+            raise ValueError("Invalid CONNECT target")
+
+        hostname, port_str = target_str.rsplit(":", 1)
+
+        return hostname, int(port_str)

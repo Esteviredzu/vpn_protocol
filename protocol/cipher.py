@@ -1,11 +1,7 @@
 from __future__ import annotations
 
-import struct
-
 from nacl.exceptions import CryptoError
 from nacl.secret import Aead
-
-from protocol.constants import HEADER_FORMAT, MAGIC, MAX_FRAME_PAYLOAD_SIZE, VERSION
 
 COUNTER_SIZE = 8
 MAX_COUNTER = (1 << 64) - 1
@@ -28,34 +24,30 @@ class SessionCipher:
         self.send_counter = 0
         self.receive_counter = 0
 
-    def encrypt(self, frame_type: int, payload: bytes) -> bytes:
-        """Шифрует данные кадра и добавляет к ним счётчик"""
+    @property
+    def overhead(self) -> int:
+        """Возвращает размер накладных расходов шифрования (счётчик + MAC)"""
+        return COUNTER_SIZE + Aead.MACBYTES
+
+    def encrypt(self, aad: bytes, payload: bytes) -> bytes:
+        """Шифрует данные и возвращает счётчик вместе с шифротекстом"""
         if self.send_counter > MAX_COUNTER:
             raise OverflowError("Send counter exhausted")
 
-        if len(payload) > MAX_FRAME_PAYLOAD_SIZE:
-            raise ValueError("Payload too large")
-
         counter = self.send_counter
-
-        encrypted_length = COUNTER_SIZE + len(payload) + self.send_box.MACBYTES
-
-        header = struct.pack(
-            HEADER_FORMAT, MAGIC, VERSION, frame_type, encrypted_length
-        )
 
         counter_bytes = counter.to_bytes(COUNTER_SIZE, "big")
 
         nonce = counter.to_bytes(self.send_box.NONCE_SIZE, "big")
 
-        ciphertext = self.send_box.encrypt(payload, aad=header, nonce=nonce).ciphertext
+        ciphertext = self.send_box.encrypt(payload, aad=aad, nonce=nonce).ciphertext
 
         self.send_counter += 1
 
-        return header + counter_bytes + ciphertext
+        return counter_bytes + ciphertext
 
-    def decrypt(self, frame_type: int, payload: bytes) -> bytes:
-        """Проверяет и расшифровывает полученные данные"""
+    def decrypt(self, aad: bytes, payload: bytes) -> bytes:
+        """Проверяет счётчик и расшифровывает данные"""
         minimum_size = COUNTER_SIZE + self.receive_box.MACBYTES
 
         if len(payload) < minimum_size:
@@ -72,17 +64,12 @@ class SessionCipher:
 
         ciphertext = payload[COUNTER_SIZE:]
 
-        header = struct.pack(HEADER_FORMAT, MAGIC, VERSION, frame_type, len(payload))
-
         nonce = counter.to_bytes(self.receive_box.NONCE_SIZE, "big")
 
         try:
-            plaintext = self.receive_box.decrypt(ciphertext, aad=header, nonce=nonce)
+            plaintext = self.receive_box.decrypt(ciphertext, aad=aad, nonce=nonce)
         except CryptoError as error:
             raise ValueError("Encrypted frame authentication failed") from error
-
-        if len(plaintext) > MAX_FRAME_PAYLOAD_SIZE:
-            raise ValueError("Payload too large")
 
         self.receive_counter += 1
 

@@ -19,9 +19,6 @@ from protocol.framing import Frame, FrameCodec
 from protocol.session import KeyPair, derive_client_session_keys
 from protocol.state import ClientState
 
-MIN_FRAME_SIZE = 1024
-MAX_FRAME_SIZE = 16 * 1024
-
 
 class ServerConnection:
     """Управляет соединением клиента с VPN-сервером"""
@@ -141,7 +138,7 @@ class ServerConnection:
         """Разбивает данные на кадры и отправляет их серверу"""
         self._require_state(ClientState.OPEN)
 
-        for frame in FrameCodec.split_data(data, MIN_FRAME_SIZE, MAX_FRAME_SIZE):
+        for frame in FrameCodec.split_data(data):
             await FrameCodec.send(self.writer, frame, cipher=self.cipher)
 
     async def read_frame(self):

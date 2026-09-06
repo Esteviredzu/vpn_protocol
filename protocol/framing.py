@@ -3,7 +3,15 @@ from __future__ import annotations
 import random
 import struct
 
-from protocol.constants import DATA, HEADER_FORMAT, MAGIC, MAX_FRAME_SIZE, VERSION
+from protocol.constants import (
+    DATA,
+    HEADER_FORMAT,
+    MAGIC,
+    MAX_FRAME_PAYLOAD_SIZE,
+    MAX_FRAME_SIZE,
+    MIN_DATA_FRAME_SIZE,
+    VERSION,
+)
 
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
 
@@ -28,6 +36,9 @@ class FrameCodec:
     @staticmethod
     def encode(frame: Frame) -> bytes:
         """Собирает кадр в байты вместе с заголовком"""
+        if frame.length > MAX_FRAME_PAYLOAD_SIZE:
+            raise ValueError(f"Payload too large: {frame.length}")
+
         header = struct.pack(
             HEADER_FORMAT, MAGIC, VERSION, frame.frame_type, frame.length
         )
@@ -53,7 +64,10 @@ class FrameCodec:
         payload = await reader.readexactly(length)
 
         if cipher is not None:
-            payload = cipher.decrypt(frame_type, payload)
+            payload = cipher.decrypt(header, payload)
+
+        if len(payload) > MAX_FRAME_PAYLOAD_SIZE:
+            raise ValueError(f"Payload too large: {len(payload)}")
 
         return Frame(frame_type=frame_type, payload=payload)
 
@@ -64,7 +78,18 @@ class FrameCodec:
             data = FrameCodec.encode(frame)
 
         else:
-            data = cipher.encrypt(frame.frame_type, frame.payload)
+            if frame.length > MAX_FRAME_PAYLOAD_SIZE:
+                raise ValueError(f"Payload too large: {frame.length}")
+
+            encrypted_length = frame.length + cipher.overhead
+
+            header = struct.pack(
+                HEADER_FORMAT, MAGIC, VERSION, frame.frame_type, encrypted_length
+            )
+
+            encrypted_payload = cipher.encrypt(header, frame.payload)
+
+            data = header + encrypted_payload
 
         writer.write(data)
 
@@ -77,7 +102,9 @@ class FrameCodec:
 
     @staticmethod
     def split_data(
-        data: bytes, min_size: int = 1024, max_size: int = 16 * 1024
+        data: bytes,
+        min_size: int = MIN_DATA_FRAME_SIZE,
+        max_size: int = MAX_FRAME_PAYLOAD_SIZE,
     ) -> list[Frame]:
         """Разбивает большие данные на несколько кадров случайного размера"""
         frames = []
