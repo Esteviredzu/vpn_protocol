@@ -1,10 +1,42 @@
 from __future__ import annotations
 
+import hashlib
+
 from nacl.exceptions import CryptoError
 from nacl.secret import Aead
 
 COUNTER_SIZE = 8
 MAX_COUNTER = (1 << 64) - 1
+REPLAY_WINDOW_SIZE = 1024
+
+
+class ReplayProtection:
+    """Защита от replay-атак с помощью sliding window"""
+
+    def __init__(self, window_size: int = REPLAY_WINDOW_SIZE) -> None:
+        """Создаёт sliding window заданного размера"""
+        self.window_size = window_size
+        self.last_accepted = -1
+        self.window = 0
+
+    def check(self, counter: int) -> bool:
+        """Проверяет, что counter не был использован ранее"""
+        if counter > self.last_accepted:
+            shift = counter - self.last_accepted
+            if shift >= self.window_size:
+                self.window = 1
+            else:
+                self.window = (self.window << shift) | 1
+            self.last_accepted = counter
+            return True
+        elif counter >= self.last_accepted - self.window_size + 1:
+            bit = 1 << (self.last_accepted - counter)
+            if self.window & bit:
+                return False
+            self.window |= bit
+            return True
+        else:
+            return False
 
 
 class SessionCipher:
@@ -20,9 +52,16 @@ class SessionCipher:
 
         self.send_box = Aead(send_key)
         self.receive_box = Aead(receive_key)
+        self.send_key = send_key
+        self.receive_key = receive_key
 
         self.send_counter = 0
         self.receive_counter = 0
+
+        self.replay = ReplayProtection()
+
+        self.packets_sent = 0
+        self.packets_received = 0
 
     @property
     def overhead(self) -> int:
@@ -43,6 +82,7 @@ class SessionCipher:
         ciphertext = self.send_box.encrypt(payload, aad=aad, nonce=nonce).ciphertext
 
         self.send_counter += 1
+        self.packets_sent += 1
 
         return counter_bytes + ciphertext
 
@@ -55,12 +95,8 @@ class SessionCipher:
 
         counter = int.from_bytes(payload[:COUNTER_SIZE], "big")
 
-        if counter != self.receive_counter:
-            raise ValueError(
-                f"Invalid frame counter: "
-                f"got {counter}, "
-                f"expected {self.receive_counter}"
-            )
+        if not self.replay.check(counter):
+            raise ValueError(f"Replay detected: counter {counter}")
 
         ciphertext = payload[COUNTER_SIZE:]
 
@@ -71,6 +107,47 @@ class SessionCipher:
         except CryptoError as error:
             raise ValueError("Encrypted frame authentication failed") from error
 
-        self.receive_counter += 1
+        self.packets_received += 1
 
         return plaintext
+
+    def update_send_key(self, new_key: bytes) -> None:
+        """Обновляет ключ отправки и сбрасывает счётчик"""
+        if len(new_key) != Aead.KEY_SIZE:
+            raise ValueError("Invalid key length")
+        self.send_key = new_key
+        self.send_box = Aead(new_key)
+        self.send_counter = 0
+        self.packets_sent = 0
+
+    def update_receive_key(self, new_key: bytes) -> None:
+        """Обновляет ключ приёма, сбрасывает счётчик и защиту от replay"""
+        if len(new_key) != Aead.KEY_SIZE:
+            raise ValueError("Invalid key length")
+        self.receive_key = new_key
+        self.receive_box = Aead(new_key)
+        self.receive_counter = 0
+        self.packets_received = 0
+        self.replay = ReplayProtection()
+
+
+def derive_rekeyed_keys(
+    my_send_key: bytes, my_receive_key: bytes, shared_secret: bytes
+) -> tuple[bytes, bytes]:
+    """Выводит новые ключи из старых и общего секрета"""
+    h = hashlib.sha256()
+    h.update(b"VNPROTO1 REKEY")
+    h.update(my_send_key)
+    h.update(my_receive_key)
+    h.update(shared_secret)
+    new_send_key = h.digest()
+
+    h = hashlib.sha256()
+    h.update(b"VNPROTO1 REKEY")
+    h.update(new_send_key)
+    h.update(my_send_key)
+    h.update(my_receive_key)
+    h.update(shared_secret)
+    new_receive_key = h.digest()
+
+    return new_send_key, new_receive_key

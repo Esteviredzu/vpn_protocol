@@ -9,6 +9,7 @@ from protocol.constants import (
     MAGIC,
     MAX_FRAME_PAYLOAD_SIZE,
     MAX_FRAME_SIZE,
+    MAX_PADDING_SIZE,
     MIN_DATA_FRAME_SIZE,
     VERSION,
 )
@@ -69,6 +70,12 @@ class FrameCodec:
         if len(payload) > MAX_FRAME_PAYLOAD_SIZE:
             raise ValueError(f"Payload too large: {len(payload)}")
 
+        if cipher is not None and len(payload) > 0:
+            padding_size = payload[-1]
+            if padding_size + 1 > len(payload):
+                raise ValueError("Invalid padding size")
+            payload = payload[: len(payload) - padding_size - 1]
+
         return Frame(frame_type=frame_type, payload=payload)
 
     @staticmethod
@@ -78,16 +85,28 @@ class FrameCodec:
             data = FrameCodec.encode(frame)
 
         else:
-            if frame.length > MAX_FRAME_PAYLOAD_SIZE:
-                raise ValueError(f"Payload too large: {frame.length}")
+            payload = frame.payload
 
-            encrypted_length = frame.length + cipher.overhead
+            max_real_payload = MAX_FRAME_PAYLOAD_SIZE - MAX_PADDING_SIZE - 1
+            if len(payload) > max_real_payload:
+                raise ValueError(f"Payload too large: {len(payload)}")
+
+            if len(payload) < max_real_payload:
+                padding_size = random.randint(0, MAX_PADDING_SIZE)
+                max_allowed = max_real_payload - len(payload)
+                if padding_size > max_allowed:
+                    padding_size = max_allowed
+                payload = payload + bytes([padding_size]) + b"\x00" * padding_size
+            else:
+                payload = payload + b"\x00"
+
+            encrypted_length = len(payload) + cipher.overhead
 
             header = struct.pack(
                 HEADER_FORMAT, MAGIC, VERSION, frame.frame_type, encrypted_length
             )
 
-            encrypted_payload = cipher.encrypt(header, frame.payload)
+            encrypted_payload = cipher.encrypt(header, payload)
 
             data = header + encrypted_payload
 
@@ -104,7 +123,7 @@ class FrameCodec:
     def split_data(
         data: bytes,
         min_size: int = MIN_DATA_FRAME_SIZE,
-        max_size: int = MAX_FRAME_PAYLOAD_SIZE,
+        max_size: int = MAX_FRAME_PAYLOAD_SIZE - MAX_PADDING_SIZE - 1,
     ) -> list[Frame]:
         """Разбивает большие данные на несколько кадров случайного размера"""
         frames = []
