@@ -132,22 +132,23 @@ class SessionCipher:
 
 
 def derive_rekeyed_keys(
-    my_send_key: bytes, my_receive_key: bytes, shared_secret: bytes
+    old_send_key: bytes, old_receive_key: bytes, shared_secret: bytes
 ) -> tuple[bytes, bytes]:
-    """Выводит новые ключи из старых и общего секрета"""
-    h = hashlib.sha256()
-    h.update(b"VNPROTO1 REKEY")
-    h.update(my_send_key)
-    h.update(my_receive_key)
-    h.update(shared_secret)
-    new_send_key = h.digest()
+    """
+    Выводит новые ключи из старых и общего секрета.
+    Гарантирует направленную симметрию: новый send_key клиента будет равен
+    новому receive_key сервера, и наоборот.
+    """
+    h_send = hashlib.sha256()
+    h_send.update(b"VNPROTO1 REKEY_SEND")
+    h_send.update(old_send_key)
+    h_send.update(shared_secret)
+    new_send_key = h_send.digest()
 
-    h = hashlib.sha256()
-    h.update(b"VNPROTO1 REKEY")
-    h.update(new_send_key)
-    h.update(my_send_key)
-    h.update(my_receive_key)
-    h.update(shared_secret)
-    new_receive_key = h.digest()
+    h_recv = hashlib.sha256()
+    h_recv.update(b"VNPROTO1 REKEY_RECV")
+    h_recv.update(old_receive_key)
+    h_recv.update(shared_secret)
+    new_receive_key = h_recv.digest()
 
     return new_send_key, new_receive_key

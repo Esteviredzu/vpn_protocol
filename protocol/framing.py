@@ -67,10 +67,8 @@ class FrameCodec:
         if cipher is not None:
             payload = cipher.decrypt(header, payload)
 
-        if len(payload) > MAX_FRAME_PAYLOAD_SIZE:
-            raise ValueError(f"Payload too large: {len(payload)}")
-
-        if cipher is not None and len(payload) > 0:
+        # Безопасное удаление padding только для DATA кадров
+        if cipher is not None and frame_type == DATA and len(payload) > 0:
             padding_size = payload[-1]
             if padding_size + 1 > len(payload):
                 raise ValueError("Invalid padding size")
@@ -83,22 +81,24 @@ class FrameCodec:
         """Отправляет кадр в соединение и при необходимости шифрует его"""
         if cipher is None:
             data = FrameCodec.encode(frame)
-
         else:
-            payload = frame.payload
+            # Добавляем padding только для DATA кадров, чтобы не ломать control-кадры
+            if frame.frame_type == DATA:
+                if len(frame.payload) >= MAX_FRAME_PAYLOAD_SIZE:
+                    raise ValueError(f"Payload too large: {len(frame.payload)}")
 
-            max_real_payload = MAX_FRAME_PAYLOAD_SIZE - MAX_PADDING_SIZE - 1
-            if len(payload) > max_real_payload:
-                raise ValueError(f"Payload too large: {len(payload)}")
-
-            if len(payload) < max_real_payload:
-                padding_size = random.randint(0, MAX_PADDING_SIZE)
-                max_allowed = max_real_payload - len(payload)
-                if padding_size > max_allowed:
-                    padding_size = max_allowed
-                payload = payload + bytes([padding_size]) + b"\x00" * padding_size
+                # Гарантируем, что всегда есть место хотя бы для 1 байта размера padding
+                max_padding = min(
+                    MAX_PADDING_SIZE, MAX_FRAME_PAYLOAD_SIZE - len(frame.payload) - 1
+                )
+                padding_size = random.randint(0, max_padding)
+                payload = (
+                    frame.payload + bytes([padding_size]) + (b"\x00" * padding_size)
+                )
             else:
-                payload = payload + b"\x00"
+                payload = frame.payload
+                if len(payload) > MAX_FRAME_PAYLOAD_SIZE:
+                    raise ValueError(f"Payload too large: {len(payload)}")
 
             encrypted_length = len(payload) + cipher.overhead
 
@@ -111,7 +111,6 @@ class FrameCodec:
             data = header + encrypted_payload
 
         writer.write(data)
-
         await writer.drain()
 
     @staticmethod

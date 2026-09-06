@@ -376,12 +376,12 @@ class ServerConnection:
             self.cipher.send_key, self.cipher.receive_key, shared_secret
         )
 
+        self.cipher.update_send_key(new_send_key)
+        self.cipher.update_receive_key(new_receive_key)
+
         await FrameCodec.send(
             self.writer, Frame(frame_type=REKEY_ACK), cipher=self.cipher
         )
-
-        self.cipher.update_send_key(new_send_key)
-        self.cipher.update_receive_key(new_receive_key)
 
         self.rekey_pending = False
         self.rekey_ephemeral = None
