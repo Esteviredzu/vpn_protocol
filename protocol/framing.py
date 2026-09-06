@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import random
 import struct
 
@@ -82,18 +83,17 @@ class FrameCodec:
         if cipher is None:
             data = FrameCodec.encode(frame)
         else:
-            # Добавляем padding только для DATA кадров, чтобы не ломать control-кадры
             if frame.frame_type == DATA:
                 if len(frame.payload) >= MAX_FRAME_PAYLOAD_SIZE:
                     raise ValueError(f"Payload too large: {len(frame.payload)}")
 
-                # Гарантируем, что всегда есть место хотя бы для 1 байта размера padding
                 max_padding = min(
                     MAX_PADDING_SIZE, MAX_FRAME_PAYLOAD_SIZE - len(frame.payload) - 1
                 )
                 padding_size = random.randint(0, max_padding)
+
                 payload = (
-                    frame.payload + bytes([padding_size]) + (b"\x00" * padding_size)
+                    frame.payload + os.urandom(padding_size) + bytes([padding_size])
                 )
             else:
                 payload = frame.payload

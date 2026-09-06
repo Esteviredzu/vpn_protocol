@@ -19,7 +19,6 @@ from protocol.constants import (
     HELLO_OK,
     KEEPALIVE_INTERVAL_SECONDS,
     KEEPALIVE_TIMEOUT_SECONDS,
-    MAX_FRAME_PAYLOAD_SIZE,
     OPEN,
     OPEN_OK,
     PING,
@@ -240,14 +239,13 @@ class ClientConnection:
         self._require_state(ServerState.OPEN)
 
         while True:
-            data = await self.target.receive(MAX_FRAME_PAYLOAD_SIZE)
+            data = await self.target.receive(64 * 1024)
 
             if not data:
                 break
 
-            await FrameCodec.send(
-                self.writer, FrameCodec.create_data(data), cipher=self.cipher
-            )
+            for frame in FrameCodec.split_data(data):
+                await FrameCodec.send(self.writer, frame, cipher=self.cipher)
 
             self.last_activity_time = time.monotonic()
 
