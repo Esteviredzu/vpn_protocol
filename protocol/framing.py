@@ -48,6 +48,44 @@ class FrameCodec:
         return header + frame.payload
 
     @staticmethod
+    def prepare_send(frame: Frame, cipher=None) -> bytes:
+        """Подготавливает байты кадра для отправки без записи в сокет"""
+        if cipher is None:
+            return FrameCodec.encode(frame)
+
+        if frame.frame_type == DATA:
+            if len(frame.payload) >= MAX_FRAME_PAYLOAD_SIZE:
+                raise ValueError(f"Payload too large: {len(frame.payload)}")
+
+            max_padding = min(
+                MAX_PADDING_SIZE, MAX_FRAME_PAYLOAD_SIZE - len(frame.payload) - 1
+            )
+            padding_size = random.randint(0, max_padding)
+
+            payload = frame.payload + os.urandom(padding_size) + bytes([padding_size])
+        else:
+            payload = frame.payload
+            if len(payload) > MAX_FRAME_PAYLOAD_SIZE:
+                raise ValueError(f"Payload too large: {len(payload)}")
+
+        encrypted_length = len(payload) + cipher.overhead
+
+        header = struct.pack(
+            HEADER_FORMAT, MAGIC, VERSION, frame.frame_type, encrypted_length
+        )
+
+        encrypted_payload = cipher.encrypt(header, payload)
+
+        return header + encrypted_payload
+
+    @staticmethod
+    async def send(writer, frame: Frame, cipher=None) -> None:
+        """Отправляет кадр в соединение и при необходимости шифрует его"""
+        data = FrameCodec.prepare_send(frame, cipher)
+        writer.write(data)
+        await writer.drain()
+
+    @staticmethod
     async def read(reader, cipher=None) -> Frame:
         """Читает кадр из соединения и при необходимости расшифровывает его"""
         header = await reader.readexactly(HEADER_SIZE)
@@ -68,7 +106,6 @@ class FrameCodec:
         if cipher is not None:
             payload = cipher.decrypt(header, payload)
 
-        # Безопасное удаление padding только для DATA кадров
         if cipher is not None and frame_type == DATA and len(payload) > 0:
             padding_size = payload[-1]
             if padding_size + 1 > len(payload):
@@ -76,42 +113,6 @@ class FrameCodec:
             payload = payload[: len(payload) - padding_size - 1]
 
         return Frame(frame_type=frame_type, payload=payload)
-
-    @staticmethod
-    async def send(writer, frame: Frame, cipher=None) -> None:
-        """Отправляет кадр в соединение и при необходимости шифрует его"""
-        if cipher is None:
-            data = FrameCodec.encode(frame)
-        else:
-            if frame.frame_type == DATA:
-                if len(frame.payload) >= MAX_FRAME_PAYLOAD_SIZE:
-                    raise ValueError(f"Payload too large: {len(frame.payload)}")
-
-                max_padding = min(
-                    MAX_PADDING_SIZE, MAX_FRAME_PAYLOAD_SIZE - len(frame.payload) - 1
-                )
-                padding_size = random.randint(0, max_padding)
-
-                payload = (
-                    frame.payload + os.urandom(padding_size) + bytes([padding_size])
-                )
-            else:
-                payload = frame.payload
-                if len(payload) > MAX_FRAME_PAYLOAD_SIZE:
-                    raise ValueError(f"Payload too large: {len(payload)}")
-
-            encrypted_length = len(payload) + cipher.overhead
-
-            header = struct.pack(
-                HEADER_FORMAT, MAGIC, VERSION, frame.frame_type, encrypted_length
-            )
-
-            encrypted_payload = cipher.encrypt(header, payload)
-
-            data = header + encrypted_payload
-
-        writer.write(data)
-        await writer.drain()
 
     @staticmethod
     def create_data(data: bytes) -> Frame:
@@ -141,3 +142,30 @@ class FrameCodec:
             offset += size
 
         return frames
+
+
+class FrameBatcher:
+    """Буферизирует кадры для пакетной отправки"""
+
+    def __init__(self, writer, cipher=None, max_size: int = 32768) -> None:
+        """Создаёт батчер с указанным максимальным размером буфера"""
+        self.writer = writer
+        self.cipher = cipher
+        self.max_size = max_size
+        self.buffer = bytearray()
+
+    async def add(self, frame: Frame) -> None:
+        """Добавляет кадр в буфер и сбрасывает его при переполнении"""
+        data = FrameCodec.prepare_send(frame, self.cipher)
+
+        if len(self.buffer) + len(data) > self.max_size:
+            await self.flush()
+
+        self.buffer.extend(data)
+
+    async def flush(self) -> None:
+        """Отправляет накопленные данные и очищает буфер"""
+        if self.buffer:
+            self.writer.write(self.buffer)
+            await self.writer.drain()
+            self.buffer.clear()

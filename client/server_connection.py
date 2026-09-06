@@ -28,7 +28,7 @@ from protocol.constants import (
     REKEY_RESP,
     REKEY_TIMEOUT_SECONDS,
 )
-from protocol.framing import Frame, FrameCodec
+from protocol.framing import Frame, FrameBatcher, FrameCodec
 from protocol.session import KeyPair, derive_client_session_keys
 from protocol.state import ClientState
 
@@ -163,11 +163,15 @@ class ServerConnection:
         self.state = ClientState.OPEN
 
     async def send_data(self, data: bytes) -> None:
-        """Разбивает данные на кадры и отправляет их серверу"""
+        """Разбивает данные на кадры и отправляет их серверу пакетно"""
         self._require_state(ClientState.OPEN)
 
+        batcher = FrameBatcher(self.writer, self.cipher)
+
         for frame in FrameCodec.split_data(data):
-            await FrameCodec.send(self.writer, frame, cipher=self.cipher)
+            await batcher.add(frame)
+
+        await batcher.flush()
 
         self.last_activity_time = time.monotonic()
 

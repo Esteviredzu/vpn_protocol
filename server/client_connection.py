@@ -30,7 +30,7 @@ from protocol.constants import (
     REKEY_RESP,
     REKEY_TIMEOUT_SECONDS,
 )
-from protocol.framing import Frame, FrameCodec
+from protocol.framing import Frame, FrameBatcher, FrameCodec
 from protocol.session import KeyPair, derive_server_session_keys
 from protocol.state import ServerState
 from server.target_connection import TargetConnection
@@ -235,8 +235,10 @@ class ClientConnection:
                 raise ValueError(f"Unexpected frame: " f"{frame.frame_type}")
 
     async def _target_to_client(self) -> None:
-        """Читает данные от target и отправляет их клиенту"""
+        """Читает данные от target и отправляет их клиенту пакетно"""
         self._require_state(ServerState.OPEN)
+
+        batcher = FrameBatcher(self.writer, self.cipher)
 
         while True:
             data = await self.target.receive(64 * 1024)
@@ -245,7 +247,9 @@ class ClientConnection:
                 break
 
             for frame in FrameCodec.split_data(data):
-                await FrameCodec.send(self.writer, frame, cipher=self.cipher)
+                await batcher.add(frame)
+
+            await batcher.flush()
 
             self.last_activity_time = time.monotonic()
 
