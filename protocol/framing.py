@@ -19,12 +19,15 @@ HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
 
 
 class Frame:
-    """Хранит тип кадра и его payload"""
+    """Хранит тип кадра, stream_id и его payload"""
 
-    def __init__(self, frame_type: int, payload: bytes = b"") -> None:
-        """Создаёт кадр с указанным типом и данными"""
+    def __init__(
+        self, frame_type: int, payload: bytes = b"", stream_id: int = 0
+    ) -> None:
+        """Создаёт кадр с указанным типом, stream_id и данными"""
         self.frame_type = frame_type
         self.payload = payload
+        self.stream_id = stream_id
 
     @property
     def length(self) -> int:
@@ -42,7 +45,12 @@ class FrameCodec:
             raise ValueError(f"Payload too large: {frame.length}")
 
         header = struct.pack(
-            HEADER_FORMAT, MAGIC, VERSION, frame.frame_type, frame.length
+            HEADER_FORMAT,
+            MAGIC,
+            VERSION,
+            frame.frame_type,
+            frame.length,
+            frame.stream_id,
         )
 
         return header + frame.payload
@@ -71,7 +79,12 @@ class FrameCodec:
         encrypted_length = len(payload) + cipher.overhead
 
         header = struct.pack(
-            HEADER_FORMAT, MAGIC, VERSION, frame.frame_type, encrypted_length
+            HEADER_FORMAT,
+            MAGIC,
+            VERSION,
+            frame.frame_type,
+            encrypted_length,
+            frame.stream_id,
         )
 
         encrypted_payload = cipher.encrypt(header, payload)
@@ -90,7 +103,9 @@ class FrameCodec:
         """Читает кадр из соединения и при необходимости расшифровывает его"""
         header = await reader.readexactly(HEADER_SIZE)
 
-        magic, version, frame_type, length = struct.unpack(HEADER_FORMAT, header)
+        magic, version, frame_type, length, stream_id = struct.unpack(
+            HEADER_FORMAT, header
+        )
 
         if magic != MAGIC:
             raise ValueError("Invalid magic")
@@ -112,16 +127,17 @@ class FrameCodec:
                 raise ValueError("Invalid padding size")
             payload = payload[: len(payload) - padding_size - 1]
 
-        return Frame(frame_type=frame_type, payload=payload)
+        return Frame(frame_type=frame_type, payload=payload, stream_id=stream_id)
 
     @staticmethod
-    def create_data(data: bytes) -> Frame:
+    def create_data(data: bytes, stream_id: int) -> Frame:
         """Создаёт data кадр из переданных данных"""
-        return Frame(frame_type=DATA, payload=data)
+        return Frame(frame_type=DATA, payload=data, stream_id=stream_id)
 
     @staticmethod
     def split_data(
         data: bytes,
+        stream_id: int,
         min_size: int = MIN_DATA_FRAME_SIZE,
         max_size: int = MAX_FRAME_PAYLOAD_SIZE - MAX_PADDING_SIZE - 1,
     ) -> list[Frame]:
@@ -137,7 +153,13 @@ class FrameCodec:
             else:
                 size = random.randint(min_size, max_size)
 
-            frames.append(FrameCodec.create_data(data[offset : offset + size]))
+            frames.append(
+                Frame(
+                    frame_type=DATA,
+                    payload=data[offset : offset + size],
+                    stream_id=stream_id,
+                )
+            )
 
             offset += size
 

@@ -48,9 +48,7 @@ class ServerConnection:
         self.writer = None
 
         self.key_pair = KeyPair.generate()
-
         self.cipher = None
-
         self.state = ClientState.DISCONNECTED
 
         self.last_activity_time = 0.0
@@ -58,16 +56,19 @@ class ServerConnection:
 
         self.keepalive_task = None
         self.rekey_task = None
+        self.read_task = None
 
         self.rekey_pending = False
         self.rekey_ephemeral = None
-
         self.close_ack_received = False
+
+        self.next_stream_id = 1
+        self.stream_queues: dict[int, asyncio.Queue] = {}
+        self.active_streams: set[int] = set()
 
     async def connect(self) -> None:
         """Устанавливает tcp соединение с сервером и запускает handshake"""
         self.reader, self.writer = await asyncio.open_connection(self.host, self.port)
-
         self.state = ClientState.CONNECTED
 
         await self.handshake()
@@ -77,6 +78,7 @@ class ServerConnection:
 
         self.keepalive_task = asyncio.create_task(self._keepalive_loop())
         self.rekey_task = asyncio.create_task(self._rekey_loop())
+        self.read_task = asyncio.create_task(self._read_loop())
 
     async def handshake(self) -> None:
         """Проводит обмен ключами и авторизацию клиента"""
@@ -85,41 +87,34 @@ class ServerConnection:
         await FrameCodec.send(
             self.writer, Frame(frame_type=HELLO, payload=self.key_pair.public_key)
         )
-
         self.state = ClientState.HELLO_SENT
 
         frame = await FrameCodec.read(self.reader)
-
         if frame.frame_type != HELLO_OK:
             raise ValueError("Expected HELLO_OK")
 
         server_public_key = frame.payload
-
         if len(server_public_key) != 32:
             raise ValueError("Invalid server public key")
 
         self.state = ClientState.AUTHENTICATING
 
         frame = await FrameCodec.read(self.reader)
-
         if frame.frame_type != AUTH_CHALLENGE:
             raise ValueError("Expected AUTH_CHALLENGE")
 
         challenge = frame.payload
-
         if len(challenge) != 32:
             raise ValueError("Invalid challenge length")
 
         response = create_response(
             self.secret, challenge, self.key_pair.public_key, server_public_key
         )
-
         await FrameCodec.send(
             self.writer, Frame(frame_type=AUTH_RESPONSE, payload=response)
         )
 
         frame = await FrameCodec.read(self.reader)
-
         if frame.frame_type != AUTH_OK:
             raise PermissionError("Authentication failed")
 
@@ -134,106 +129,90 @@ class ServerConnection:
             raise PermissionError("Server authentication failed")
 
         session_keys = derive_client_session_keys(self.key_pair, server_public_key)
-
         self.cipher = SessionCipher(
             send_key=session_keys.send_key, receive_key=session_keys.receive_key
         )
-
         self.state = ClientState.READY
 
-    async def open_target(self, hostname: str, port: int) -> None:
-        """Просит сервер открыть соединение с указанным адресом"""
+    async def open_stream(self, hostname: str, port: int) -> int:
+        """Открывает новый стрим к целевому адресу и возвращает его ID"""
         self._require_state(ClientState.READY)
 
-        hostname_bytes = hostname.encode()
+        stream_id = self.next_stream_id
+        self.next_stream_id += 1
+        self.active_streams.add(stream_id)
+        self.stream_queues[stream_id] = asyncio.Queue()
 
+        hostname_bytes = hostname.encode()
         payload = (
             len(hostname_bytes).to_bytes(2, "big")
             + hostname_bytes
             + port.to_bytes(2, "big")
+            + stream_id.to_bytes(2, "big")
         )
 
         await FrameCodec.send(
-            self.writer, Frame(frame_type=OPEN, payload=payload), cipher=self.cipher
+            self.writer,
+            Frame(frame_type=OPEN, payload=payload, stream_id=stream_id),
+            cipher=self.cipher,
         )
 
-        self.state = ClientState.OPEN_SENT
+        queue = self.stream_queues[stream_id]
+        while True:
+            frame = await queue.get()
+            if frame.frame_type == OPEN_OK:
+                return stream_id
+            elif frame.frame_type == CLOSE:
+                self.active_streams.discard(stream_id)
+                raise ConnectionError("Server failed to open target")
 
-        frame = await FrameCodec.read(self.reader, cipher=self.cipher)
-
-        if frame.frame_type != OPEN_OK:
-            raise ConnectionError("Server failed to open target")
-
-        self.state = ClientState.OPEN
-
-    async def send_data(self, data: bytes) -> None:
-        """Разбивает данные на кадры и отправляет их серверу пакетно"""
-        self._require_state(ClientState.OPEN)
+    async def send_data(self, stream_id: int, data: bytes) -> None:
+        """Отправляет данные в указанный стрим"""
+        if stream_id not in self.active_streams:
+            raise ValueError("Stream is not active")
 
         batcher = FrameBatcher(self.writer, self.cipher)
-
-        for frame in FrameCodec.split_data(data):
+        for frame in FrameCodec.split_data(data, stream_id=stream_id):
             await batcher.add(frame)
-
         await batcher.flush()
 
         self.last_activity_time = time.monotonic()
 
-    async def read_frame(self):
-        """Читает следующий кадр от сервера"""
-        self._require_state(ClientState.OPEN)
-
-        frame = await FrameCodec.read(self.reader, cipher=self.cipher)
+    async def read_frame(self, stream_id: int) -> Frame:
+        """Читает следующий кадр из указанного стрима"""
+        if stream_id not in self.active_streams:
+            raise ValueError("Stream is not active")
 
         self.last_activity_time = time.monotonic()
+        return await self.stream_queues[stream_id].get()
 
-        if frame.frame_type == PING:
-            await FrameCodec.send(
-                self.writer, Frame(frame_type=PONG), cipher=self.cipher
-            )
-            return await self.read_frame()
+    async def close_stream(self, stream_id: int) -> None:
+        """Закрывает указанный стрим"""
+        if stream_id not in self.active_streams:
+            return
 
-        if frame.frame_type == PONG:
-            return await self.read_frame()
-
-        if frame.frame_type == REKEY_INIT:
-            await self._handle_rekey_init(frame.payload)
-            return await self.read_frame()
-
-        if frame.frame_type == REKEY_RESP:
-            await self._handle_rekey_resp(frame.payload)
-            return await self.read_frame()
-
-        if frame.frame_type == REKEY_ACK:
-            await self._handle_rekey_ack()
-            return await self.read_frame()
-
-        if frame.frame_type == CLOSE:
-            await FrameCodec.send(
-                self.writer, Frame(frame_type=CLOSE_ACK), cipher=self.cipher
-            )
-            self.state = ClientState.CLOSING
-            return frame
-
-        return frame
+        self.active_streams.discard(stream_id)
+        if self.cipher is not None and self.state not in (
+            ClientState.CLOSING,
+            ClientState.CLOSED,
+        ):
+            try:
+                await FrameCodec.send(
+                    self.writer,
+                    Frame(frame_type=CLOSE, stream_id=stream_id),
+                    cipher=self.cipher,
+                )
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                pass
 
     async def close(self) -> None:
-        """Закрывает соединение с сервером"""
+        """Закрывает всё соединение с сервером"""
         if self.keepalive_task:
             self.keepalive_task.cancel()
-            try:
-                await self.keepalive_task
-            except asyncio.CancelledError:
-                pass
-            self.keepalive_task = None
-
         if self.rekey_task:
             self.rekey_task.cancel()
-            try:
-                await self.rekey_task
-            except asyncio.CancelledError:
-                pass
-            self.rekey_task = None
+        if self.read_task:
+            self.read_task.cancel()
 
         if self.writer is None:
             return
@@ -246,23 +225,62 @@ class ServerConnection:
             ClientState.CLOSED,
         ):
             self.state = ClientState.CLOSING
-
             try:
                 await FrameCodec.send(
-                    writer, Frame(frame_type=CLOSE), cipher=self.cipher
+                    writer, Frame(frame_type=CLOSE, stream_id=0), cipher=self.cipher
                 )
                 await self._wait_close_ack()
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 pass
 
         writer.close()
-
         try:
             await writer.wait_closed()
         except OSError:
             pass
 
         self.state = ClientState.CLOSED
+
+    async def _read_loop(self) -> None:
+        """Центральный цикл чтения, маршрутизирующий кадры по стримам"""
+        try:
+            while self.state not in (ClientState.CLOSING, ClientState.CLOSED):
+                frame = await FrameCodec.read(self.reader, cipher=self.cipher)
+                self.last_activity_time = time.monotonic()
+
+                if frame.stream_id == 0:
+                    await self._handle_control_frame(frame)
+                else:
+                    if frame.stream_id in self.stream_queues:
+                        await self.stream_queues[frame.stream_id].put(frame)
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            await self.close()
+
+    async def _handle_control_frame(self, frame: Frame) -> None:
+        """Обрабатывает управляющие кадры (stream_id == 0)"""
+        if frame.frame_type == PING:
+            await FrameCodec.send(
+                self.writer, Frame(frame_type=PONG, stream_id=0), cipher=self.cipher
+            )
+        elif frame.frame_type == PONG:
+            pass
+        elif frame.frame_type == REKEY_INIT:
+            await self._handle_rekey_init(frame.payload)
+        elif frame.frame_type == REKEY_RESP:
+            await self._handle_rekey_resp(frame.payload)
+        elif frame.frame_type == REKEY_ACK:
+            await self._handle_rekey_ack()
+        elif frame.frame_type == CLOSE:
+            await FrameCodec.send(
+                self.writer,
+                Frame(frame_type=CLOSE_ACK, stream_id=0),
+                cipher=self.cipher,
+            )
+            self.state = ClientState.CLOSING
+        elif frame.frame_type == CLOSE_ACK:
+            self.close_ack_received = True
 
     async def _wait_close_ack(self) -> None:
         """Ожидает получение CLOSE_ACK от сервера"""
@@ -285,24 +303,22 @@ class ServerConnection:
     async def _keepalive_loop(self) -> None:
         """Отправляет PING для поддержания соединения"""
         try:
-            while self.state == ClientState.OPEN:
+            while self.state == ClientState.READY or (
+                self.state == ClientState.OPEN and not self.active_streams
+            ):
                 await asyncio.sleep(KEEPALIVE_INTERVAL_SECONDS)
-
                 if self.writer is None:
                     break
-
                 now = time.monotonic()
-                idle_time = now - self.last_activity_time
-
-                if idle_time >= KEEPALIVE_INTERVAL_SECONDS:
+                if now - self.last_activity_time >= KEEPALIVE_INTERVAL_SECONDS:
                     await FrameCodec.send(
-                        self.writer, Frame(frame_type=PING), cipher=self.cipher
+                        self.writer,
+                        Frame(frame_type=PING, stream_id=0),
+                        cipher=self.cipher,
                     )
                     self.last_activity_time = now
-
                 if now - self.last_activity_time > KEEPALIVE_TIMEOUT_SECONDS:
                     raise ConnectionError("Keepalive timeout")
-
         except asyncio.CancelledError:
             pass
         except Exception as error:
@@ -312,24 +328,17 @@ class ServerConnection:
     async def _rekey_loop(self) -> None:
         """Инициирует rekey при необходимости"""
         try:
-            while self.state == ClientState.OPEN:
+            while self.state not in (ClientState.CLOSING, ClientState.CLOSED):
                 await asyncio.sleep(60)
-
                 if self.writer is None or self.cipher is None:
                     break
-
                 now = time.monotonic()
-                packets_sent = self.cipher.packets_sent
-                time_since_rekey = now - self.last_rekey_time
-
                 needs_rekey = (
-                    packets_sent >= REKEY_INTERVAL_PACKETS
-                    or time_since_rekey >= REKEY_INTERVAL_SECONDS
+                    self.cipher.packets_sent >= REKEY_INTERVAL_PACKETS
+                    or now - self.last_rekey_time >= REKEY_INTERVAL_SECONDS
                 )
-
                 if needs_rekey and not self.rekey_pending:
                     await self._initiate_rekey()
-
         except asyncio.CancelledError:
             pass
         except Exception as error:
@@ -340,10 +349,13 @@ class ServerConnection:
         """Инициирует rekey"""
         self.rekey_pending = True
         self.rekey_ephemeral = KeyPair.generate()
-
         await FrameCodec.send(
             self.writer,
-            Frame(frame_type=REKEY_INIT, payload=self.rekey_ephemeral.public_key),
+            Frame(
+                frame_type=REKEY_INIT,
+                payload=self.rekey_ephemeral.public_key,
+                stream_id=0,
+            ),
             cipher=self.cipher,
         )
 
@@ -353,7 +365,6 @@ class ServerConnection:
                 raise ConnectionError("Rekey timeout")
 
         timeout_task = asyncio.create_task(timeout_handler())
-
         try:
             while self.rekey_pending:
                 frame = await FrameCodec.read(self.reader, cipher=self.cipher)
@@ -362,61 +373,44 @@ class ServerConnection:
                     break
         finally:
             timeout_task.cancel()
-            try:
-                await timeout_task
-            except asyncio.CancelledError:
-                pass
 
     async def _handle_rekey_init(self, ephemeral_pubkey: bytes) -> None:
         """Обрабатывает REKEY_INIT от сервера"""
-        if len(ephemeral_pubkey) != 32:
-            raise ValueError("Invalid rekey public key")
-
-        if self.rekey_pending:
+        if len(ephemeral_pubkey) != 32 or self.rekey_pending:
             return
-
         ephemeral = KeyPair.generate()
-
         shared_secret = crypto_scalarmult(ephemeral.private_key, ephemeral_pubkey)
-
         new_send_key, new_receive_key = derive_rekeyed_keys(
             self.cipher.send_key, self.cipher.receive_key, shared_secret
         )
-
         await FrameCodec.send(
             self.writer,
-            Frame(frame_type=REKEY_RESP, payload=ephemeral.public_key),
+            Frame(frame_type=REKEY_RESP, payload=ephemeral.public_key, stream_id=0),
             cipher=self.cipher,
         )
-
         self.cipher.update_send_key(new_send_key)
         self.cipher.update_receive_key(new_receive_key)
-
         self.last_rekey_time = time.monotonic()
 
     async def _handle_rekey_resp(self, ephemeral_pubkey: bytes) -> None:
         """Обрабатывает REKEY_RESP от сервера"""
-        if not self.rekey_pending or self.rekey_ephemeral is None:
+        if (
+            not self.rekey_pending
+            or self.rekey_ephemeral is None
+            or len(ephemeral_pubkey) != 32
+        ):
             return
-
-        if len(ephemeral_pubkey) != 32:
-            raise ValueError("Invalid rekey public key")
-
         shared_secret = crypto_scalarmult(
             self.rekey_ephemeral.private_key, ephemeral_pubkey
         )
-
         new_send_key, new_receive_key = derive_rekeyed_keys(
             self.cipher.send_key, self.cipher.receive_key, shared_secret
         )
-
         self.cipher.update_send_key(new_send_key)
         self.cipher.update_receive_key(new_receive_key)
-
         await FrameCodec.send(
-            self.writer, Frame(frame_type=REKEY_ACK), cipher=self.cipher
+            self.writer, Frame(frame_type=REKEY_ACK, stream_id=0), cipher=self.cipher
         )
-
         self.rekey_pending = False
         self.rekey_ephemeral = None
         self.last_rekey_time = time.monotonic()
@@ -429,7 +423,5 @@ class ServerConnection:
         """Проверяет, что соединение находится в нужном состоянии"""
         if self.state != expected:
             raise RuntimeError(
-                f"Invalid client state: "
-                f"{self.state.name}, "
-                f"expected {expected.name}"
+                f"Invalid client state: {self.state.name}, expected {expected.name}"
             )
