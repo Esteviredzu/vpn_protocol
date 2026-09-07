@@ -136,7 +136,10 @@ class ServerConnection:
 
     async def open_stream(self, hostname: str, port: int) -> int:
         """Открывает новый стрим к целевому адресу и возвращает его ID"""
-        self._require_state(ClientState.READY)
+        if self.state != ClientState.READY:
+            raise RuntimeError(
+                f"Invalid client state: {self.state.name}, expected READY"
+            )
 
         stream_id = self.next_stream_id
         self.next_stream_id += 1
@@ -158,13 +161,21 @@ class ServerConnection:
         )
 
         queue = self.stream_queues[stream_id]
-        while True:
-            frame = await queue.get()
-            if frame.frame_type == OPEN_OK:
-                return stream_id
-            elif frame.frame_type == CLOSE:
-                self.active_streams.discard(stream_id)
-                raise ConnectionError("Server failed to open target")
+        try:
+            async with asyncio.timeout(30):
+                while True:
+                    frame = await queue.get()
+                    if frame.frame_type == OPEN_OK:
+                        return stream_id
+                    elif frame.frame_type == CLOSE:
+                        self.active_streams.discard(stream_id)
+                        del self.stream_queues[stream_id]
+                        raise ConnectionError("Server failed to open target")
+        except asyncio.TimeoutError:
+            self.active_streams.discard(stream_id)
+            if stream_id in self.stream_queues:
+                del self.stream_queues[stream_id]
+            raise ConnectionError("Timeout waiting for OPEN_OK")
 
     async def send_data(self, stream_id: int, data: bytes) -> None:
         """Отправляет данные в указанный стрим"""
@@ -192,6 +203,9 @@ class ServerConnection:
             return
 
         self.active_streams.discard(stream_id)
+        if stream_id in self.stream_queues:
+            del self.stream_queues[stream_id]
+
         if self.cipher is not None and self.state not in (
             ClientState.CLOSING,
             ClientState.CLOSED,
@@ -215,6 +229,7 @@ class ServerConnection:
             self.read_task.cancel()
 
         if self.writer is None:
+            self.state = ClientState.CLOSED
             return
 
         writer = self.writer
@@ -253,6 +268,8 @@ class ServerConnection:
                 else:
                     if frame.stream_id in self.stream_queues:
                         await self.stream_queues[frame.stream_id].put(frame)
+                    if frame.frame_type == CLOSE:
+                        self.active_streams.discard(frame.stream_id)
         except asyncio.CancelledError:
             pass
         except Exception:
@@ -303,9 +320,7 @@ class ServerConnection:
     async def _keepalive_loop(self) -> None:
         """Отправляет PING для поддержания соединения"""
         try:
-            while self.state == ClientState.READY or (
-                self.state == ClientState.OPEN and not self.active_streams
-            ):
+            while self.state == ClientState.READY:
                 await asyncio.sleep(KEEPALIVE_INTERVAL_SECONDS)
                 if self.writer is None:
                     break

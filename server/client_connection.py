@@ -80,6 +80,8 @@ class ClientConnection:
             await self.read_task
         except asyncio.CancelledError:
             pass
+        except Exception as error:
+            print(f"[SERVER] Run error: {error}")
         finally:
             await self.close()
 
@@ -155,6 +157,7 @@ class ClientConnection:
             pass
         except Exception as error:
             print(f"[SERVER] Read loop error: {error}")
+            raise
 
     async def _handle_control_frame(self, frame: Frame) -> None:
         """Обрабатывает управляющие кадры (stream_id == 0)"""
@@ -184,14 +187,12 @@ class ClientConnection:
             await self._handle_open(frame)
         elif frame.frame_type == DATA:
             if frame.stream_id in self.streams:
-                await self.streams[frame.stream_id].send(frame.payload)
+                try:
+                    await self.streams[frame.stream_id].send(frame.payload)
+                except Exception:
+                    await self._close_stream_and_notify(frame.stream_id)
         elif frame.frame_type == CLOSE:
-            await self._close_stream(frame.stream_id)
-            await FrameCodec.send(
-                self.writer,
-                Frame(frame_type=CLOSE_ACK, stream_id=frame.stream_id),
-                cipher=self.cipher,
-            )
+            await self._close_stream_and_notify(frame.stream_id)
 
     async def _handle_open(self, frame: Frame) -> None:
         """Обрабатывает запрос на открытие нового стрима"""
@@ -200,29 +201,50 @@ class ClientConnection:
 
         payload = frame.payload
         if len(payload) < 6:
+            await FrameCodec.send(
+                self.writer,
+                Frame(frame_type=CLOSE, stream_id=frame.stream_id),
+                cipher=self.cipher,
+            )
             return
 
-        hostname_length = struct.unpack("!H", payload[:2])[0]
-        hostname = payload[2 : 2 + hostname_length].decode()
-        port = struct.unpack("!H", payload[2 + hostname_length : 4 + hostname_length])[
-            0
-        ]
+        try:
+            hostname_length = struct.unpack("!H", payload[:2])[0]
+            hostname = payload[2 : 2 + hostname_length].decode()
+            port = struct.unpack(
+                "!H", payload[2 + hostname_length : 4 + hostname_length]
+            )[0]
+        except Exception:
+            await FrameCodec.send(
+                self.writer,
+                Frame(frame_type=CLOSE, stream_id=frame.stream_id),
+                cipher=self.cipher,
+            )
+            return
 
         print(f"[SERVER] Stream {frame.stream_id} connecting to {hostname}:{port}")
-        target = TargetConnection(hostname, port)
-        await target.connect()
-        print(f"[SERVER] Stream {frame.stream_id} connected to {hostname}:{port}")
+        try:
+            target = TargetConnection(hostname, port)
+            await target.connect()
+            print(f"[SERVER] Stream {frame.stream_id} connected to {hostname}:{port}")
 
-        self.streams[frame.stream_id] = target
-        self.stream_tasks[frame.stream_id] = asyncio.create_task(
-            self._stream_to_client(frame.stream_id, target)
-        )
+            self.streams[frame.stream_id] = target
+            self.stream_tasks[frame.stream_id] = asyncio.create_task(
+                self._stream_to_client(frame.stream_id, target)
+            )
 
-        await FrameCodec.send(
-            self.writer,
-            Frame(frame_type=OPEN_OK, stream_id=frame.stream_id),
-            cipher=self.cipher,
-        )
+            await FrameCodec.send(
+                self.writer,
+                Frame(frame_type=OPEN_OK, stream_id=frame.stream_id),
+                cipher=self.cipher,
+            )
+        except Exception as error:
+            print(f"[SERVER] Stream {frame.stream_id} failed to connect: {error}")
+            await FrameCodec.send(
+                self.writer,
+                Frame(frame_type=CLOSE, stream_id=frame.stream_id),
+                cipher=self.cipher,
+            )
 
     async def _stream_to_client(self, stream_id: int, target: TargetConnection) -> None:
         """Читает данные из target и отправляет их клиенту в рамках стрима"""
@@ -236,18 +258,42 @@ class ClientConnection:
                     await batcher.add(frame)
                 await batcher.flush()
                 self.last_activity_time = time.monotonic()
+        except Exception as error:
+            print(f"[SERVER] Stream {stream_id} read error: {error}")
+        finally:
+            await self._close_stream_and_notify(stream_id)
+
+    async def _close_stream_and_notify(self, stream_id: int) -> None:
+        """Закрывает стрим и уведомляет клиента"""
+        if stream_id not in self.streams:
+            return
+
+        try:
+            await FrameCodec.send(
+                self.writer,
+                Frame(frame_type=CLOSE, stream_id=stream_id),
+                cipher=self.cipher,
+            )
         except Exception:
             pass
-        finally:
-            await self._close_stream(stream_id)
+
+        await self._close_stream(stream_id)
 
     async def _close_stream(self, stream_id: int) -> None:
         """Закрывает и очищает ресурсы стрима"""
         if stream_id in self.streams:
-            await self.streams[stream_id].close()
+            try:
+                await self.streams[stream_id].close()
+            except Exception:
+                pass
             del self.streams[stream_id]
+
         if stream_id in self.stream_tasks:
             self.stream_tasks[stream_id].cancel()
+            try:
+                await self.stream_tasks[stream_id]
+            except (asyncio.CancelledError, Exception):
+                pass
             del self.stream_tasks[stream_id]
 
     async def close(self) -> None:

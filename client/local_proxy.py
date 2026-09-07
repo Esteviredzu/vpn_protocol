@@ -19,13 +19,11 @@ class LocalProxy:
         self.server_port = server_port
         self.secret = secret
         self.connection = None
+        self.connection_lock = asyncio.Lock()
 
     async def start(self) -> None:
         """Запускает локальный прокси и устанавливает VPN соединение"""
-        self.connection = ServerConnection(
-            self.server_host, self.server_port, self.secret
-        )
-        await self.connection.connect()
+        await self._ensure_connection()
 
         server = await asyncio.start_server(self.handle_client, LOCAL_HOST, LOCAL_PORT)
         print(f"[CLIENT] Listening on {LOCAL_HOST}:{LOCAL_PORT}")
@@ -33,10 +31,24 @@ class LocalProxy:
         async with server:
             await server.serve_forever()
 
+    async def _ensure_connection(self) -> None:
+        """Гарантирует, что VPN-соединение активно"""
+        async with self.connection_lock:
+            if self.connection is None or self.connection.state not in (
+                self.connection.state.__class__.READY,
+                self.connection.state.__class__.OPEN,
+            ):
+                self.connection = ServerConnection(
+                    self.server_host, self.server_port, self.secret
+                )
+                await self.connection.connect()
+
     async def handle_client(self, local_reader, local_writer) -> None:
         """Обрабатывает одно подключение от локального клиента"""
         stream_id = None
         try:
+            await self._ensure_connection()
+
             request = await self._read_http_headers(local_reader)
             hostname, port = self._parse_connect(request)
             print(f"[CLIENT] CONNECT {hostname}:{port}")
@@ -66,12 +78,12 @@ class LocalProxy:
                 if exception is not None:
                     raise exception
 
-        except (ConnectionError, asyncio.IncompleteReadError, ValueError):
+        except (ConnectionError, asyncio.IncompleteReadError, ValueError, RuntimeError):
             pass
         except Exception as error:
             print(f"[CLIENT] Error: {error}")
         finally:
-            if stream_id is not None:
+            if stream_id is not None and self.connection is not None:
                 await self.connection.close_stream(stream_id)
             local_writer.close()
             try:
