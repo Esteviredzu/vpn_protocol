@@ -251,8 +251,7 @@ class ServerConnection:
                 await FrameCodec.send(
                     writer, Frame(frame_type=CLOSE), cipher=self.cipher
                 )
-
-                await self._wait_close_ack(writer)
+                await self._wait_close_ack()
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 pass
 
@@ -265,7 +264,7 @@ class ServerConnection:
 
         self.state = ClientState.CLOSED
 
-    async def _wait_close_ack(self, writer) -> None:
+    async def _wait_close_ack(self) -> None:
         """Ожидает получение CLOSE_ACK от сервера"""
         try:
             async with asyncio.timeout(CLOSE_ACK_TIMEOUT_SECONDS):
@@ -274,7 +273,13 @@ class ServerConnection:
                     if frame.frame_type == CLOSE_ACK:
                         self.close_ack_received = True
                         break
-        except (asyncio.TimeoutError, ConnectionError, OSError):
+        except (
+            asyncio.TimeoutError,
+            asyncio.IncompleteReadError,
+            ConnectionError,
+            OSError,
+            Exception,
+        ):
             pass
 
     async def _keepalive_loop(self) -> None:

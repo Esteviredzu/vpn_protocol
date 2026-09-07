@@ -105,7 +105,6 @@ class ClientConnection:
                 await FrameCodec.send(
                     self.writer, Frame(frame_type=CLOSE), cipher=self.cipher
                 )
-
                 await self._wait_close_ack()
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 pass
@@ -271,7 +270,13 @@ class ClientConnection:
                     if frame.frame_type == CLOSE_ACK:
                         self.close_ack_received = True
                         break
-        except (asyncio.TimeoutError, ConnectionError, OSError):
+        except (
+            asyncio.TimeoutError,
+            asyncio.IncompleteReadError,
+            ConnectionError,
+            OSError,
+            Exception,
+        ):
             pass
 
     @staticmethod
