@@ -12,6 +12,8 @@ from protocol.constants import (
     AUTH_OK,
     AUTH_RESPONSE,
     CLOSE,
+    CLOSE_ACK,
+    CLOSE_ACK_TIMEOUT_SECONDS,
     DATA,
     HELLO,
     HELLO_OK,
@@ -59,6 +61,8 @@ class ServerConnection:
 
         self.rekey_pending = False
         self.rekey_ephemeral = None
+
+        self.close_ack_received = False
 
     async def connect(self) -> None:
         """Устанавливает tcp соединение с сервером и запускает handshake"""
@@ -204,6 +208,13 @@ class ServerConnection:
             await self._handle_rekey_ack()
             return await self.read_frame()
 
+        if frame.frame_type == CLOSE:
+            await FrameCodec.send(
+                self.writer, Frame(frame_type=CLOSE_ACK), cipher=self.cipher
+            )
+            self.state = ClientState.CLOSING
+            return frame
+
         return frame
 
     async def close(self) -> None:
@@ -240,6 +251,8 @@ class ServerConnection:
                 await FrameCodec.send(
                     writer, Frame(frame_type=CLOSE), cipher=self.cipher
                 )
+
+                await self._wait_close_ack(writer)
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 pass
 
@@ -251,6 +264,18 @@ class ServerConnection:
             pass
 
         self.state = ClientState.CLOSED
+
+    async def _wait_close_ack(self, writer) -> None:
+        """Ожидает получение CLOSE_ACK от сервера"""
+        try:
+            async with asyncio.timeout(CLOSE_ACK_TIMEOUT_SECONDS):
+                while not self.close_ack_received:
+                    frame = await FrameCodec.read(self.reader, cipher=self.cipher)
+                    if frame.frame_type == CLOSE_ACK:
+                        self.close_ack_received = True
+                        break
+        except (asyncio.TimeoutError, ConnectionError, OSError):
+            pass
 
     async def _keepalive_loop(self) -> None:
         """Отправляет PING для поддержания соединения"""
